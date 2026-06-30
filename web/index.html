@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>false_vacuum_decay_front — live</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8d0e0; }
+  #gl { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #panel {
+    position: fixed; top: 12px; left: 12px; padding: 12px 14px;
+    background: rgba(10, 12, 20, 0.72); backdrop-filter: blur(6px);
+    border: 1px solid rgba(120, 140, 200, 0.25); border-radius: 10px;
+    max-width: 280px; user-select: none;
+  }
+  #panel h1 { font-size: 12px; margin: 0 0 8px; letter-spacing: 0.04em;
+    color: #9fb0ff; text-transform: uppercase; }
+  #panel label { display: block; margin: 8px 0 2px; color: #8a93a8; font-size: 11px; }
+  select, button { width: 100%; padding: 6px 8px; background: #11141f;
+    color: #d8e0f0; border: 1px solid rgba(120,140,200,0.3); border-radius: 6px;
+    font: inherit; }
+  button { cursor: pointer; margin-top: 8px; }
+  button:hover { border-color: rgba(160,180,255,0.6); }
+  .row { display: flex; gap: 8px; }
+  .row button { margin-top: 0; }
+  #hint { margin-top: 10px; color: #5e6678; font-size: 10px; line-height: 1.4; }
+  #err { position: fixed; bottom: 0; left: 0; right: 0; max-height: 40vh;
+    overflow: auto; margin: 0; padding: 10px 14px; background: #1a0808;
+    color: #ff9a9a; white-space: pre-wrap; display: none; border-top: 1px solid #511; }
+  #fps { position: fixed; top: 12px; right: 12px; padding: 4px 8px;
+    background: rgba(10,12,20,0.6); border-radius: 6px; color: #7e8aa0; }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="fps">— fps</div>
+<div id="panel">
+  <h1>false vacuum decay</h1>
+  <label for="shader">shader</label>
+  <select id="shader"></select>
+  <div class="row">
+    <button id="pause">⏸ pause</button>
+    <button id="reset">⟲ reset</button>
+  </div>
+  <div id="hint">
+    click / drag on the canvas to move the nucleation point.<br>
+    serve over http (e.g. <code>python3 -m http.server</code>) — file:// blocks shader fetches.
+  </div>
+</div>
+<pre id="err"></pre>
+
+<script type="module">
+// =============================================================================
+// Browser-side mirror of tools/build.mjs: fetch a .frag, resolve its
+// `#include "core/*.glsl"` lines, prepend the WebGL2 header, compile, run.
+// Single source of truth — these are the exact files in ../shaders/.
+// =============================================================================
+const SHADER_ROOT = "../shaders/";
+
+const SHADERS = [
+  ["demo/universe_death.frag",        "demo · universe death"],
+  ["demo/bubble_chamber.frag",        "demo · bubble chamber"],
+  ["demo/stalled_front.frag",         "demo · stalled front"],
+  ["compositing/full_screen.frag",    "composite · full screen"],
+  ["compositing/pip_nucleation.frag", "composite · pip nucleation"],
+  ["compositing/multi_bubble.frag",   "composite · multi bubble"],
+  ["compositing/reverse.frag",        "composite · reverse (reclaim)"],
+];
+
+const HEADER = `#version 300 es
+precision highp float;
+precision highp int;
+uniform vec3  iResolution;
+uniform float iTime;
+uniform vec4  iMouse;
+#define FVD_STANDALONE 1
+#define FVD_NO_UNIFORMS 1
+`;
+
+const INCLUDE_RE = /^\s*#include\s+"([^"]+)"\s*$/;
+
+async function flatten(path, seen = new Set()) {
+  if (seen.has(path)) return "";
+  seen.add(path);
+  const res = await fetch(SHADER_ROOT + path);
+  if (!res.ok) throw new Error(`fetch ${path}: ${res.status} ${res.statusText}`);
+  const src = await res.text();
+  const out = [];
+  for (const line of src.split("\n")) {
+    const m = line.match(INCLUDE_RE);
+    if (m) out.push(await flatten(m[1], seen));   // includes are relative to shaders/
+    else out.push(line);
+  }
+  return out.join("\n");
+}
+
+// ---- WebGL2 plumbing -------------------------------------------------------
+const canvas = document.getElementById("gl");
+const errEl = document.getElementById("err");
+const fpsEl = document.getElementById("fps");
+const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
+if (!gl) { showErr("WebGL2 not available in this browser."); }
+
+const VERT = `#version 300 es
+in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;
+
+let program = null, startTime = performance.now(), paused = false, pausedAt = 0;
+const mouse = { x: 0, y: 0, down: 0 };
+const uni = {};
+
+function showErr(msg) { errEl.style.display = "block"; errEl.textContent = msg; }
+function clearErr() { errEl.style.display = "none"; errEl.textContent = ""; }
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(s);
+    // annotate with line numbers to make GLSL errors locatable
+    const numbered = src.split("\n").map((l, i) => `${String(i + 1).padStart(4)}  ${l}`).join("\n");
+    throw new Error(log + "\n\n--- shader source ---\n" + numbered);
+  }
+  return s;
+}
+
+function buildProgram(fragSrc) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fragSrc));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw new Error("link: " + gl.getProgramInfoLog(p));
+  return p;
+}
+
+// fullscreen triangle
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+
+async function load(path) {
+  clearErr();
+  try {
+    const frag = HEADER + "\n" + await flatten(path);
+    const next = buildProgram(frag);
+    if (program) gl.deleteProgram(program);
+    program = next;
+    gl.useProgram(program);
+    const loc = gl.getAttribLocation(program, "p");
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    uni.iResolution = gl.getUniformLocation(program, "iResolution");
+    uni.iTime = gl.getUniformLocation(program, "iTime");
+    uni.iMouse = gl.getUniformLocation(program, "iMouse");
+    reset();
+  } catch (e) {
+    showErr(String(e.message || e));
+  }
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.floor(canvas.clientWidth * dpr);
+  const h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    gl.viewport(0, 0, w, h);
+  }
+}
+
+let frames = 0, lastFps = performance.now();
+function render(now) {
+  requestAnimationFrame(render);
+  if (!program) return;
+  resize();
+  const t = paused ? pausedAt : (now - startTime) / 1000;
+  gl.uniform3f(uni.iResolution, canvas.width, canvas.height, 1.0);
+  gl.uniform1f(uni.iTime, t);
+  gl.uniform4f(uni.iMouse, mouse.x, mouse.y, mouse.down, 0.0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  frames++;
+  if (now - lastFps > 500) {
+    fpsEl.textContent = `${Math.round(frames * 1000 / (now - lastFps))} fps`;
+    frames = 0; lastFps = now;
+  }
+}
+
+function reset() { startTime = performance.now(); pausedAt = 0; }
+
+// ---- UI --------------------------------------------------------------------
+const sel = document.getElementById("shader");
+for (const [path, label] of SHADERS) {
+  const o = document.createElement("option");
+  o.value = path; o.textContent = label; sel.appendChild(o);
+}
+sel.addEventListener("change", () => load(sel.value));
+document.getElementById("reset").addEventListener("click", reset);
+document.getElementById("pause").addEventListener("click", (e) => {
+  if (!paused) { pausedAt = (performance.now() - startTime) / 1000; paused = true; e.target.textContent = "▶ play"; }
+  else { startTime = performance.now() - pausedAt * 1000; paused = false; e.target.textContent = "⏸ pause"; }
+});
+
+function setMouse(ev) {
+  const r = canvas.getBoundingClientRect();
+  const dpr = canvas.width / r.width;
+  mouse.x = (ev.clientX - r.left) * dpr;
+  mouse.y = (r.height - (ev.clientY - r.top)) * dpr;  // flip Y to GL convention
+}
+canvas.addEventListener("pointerdown", (e) => { mouse.down = 1; setMouse(e); });
+canvas.addEventListener("pointermove", (e) => { if (mouse.down) setMouse(e); });
+window.addEventListener("pointerup", () => { mouse.down = 0; });
+
+load(SHADERS[0][0]);
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
