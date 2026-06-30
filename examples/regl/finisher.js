@@ -80,7 +80,8 @@ const draw = regl({
       gl_FragColor=vec4(tonemap(col),1.);
     }
   `,
-  attributes: { position: [-1, -1, 3, -1, -1, 3] },
+  // nested vec2s so regl infers size:2; a flat array would default to size:1
+  attributes: { position: [[-1, -1], [3, -1], [-1, 3]] },
   uniforms: {
     uResolution: ({ viewportWidth, viewportHeight }) => [viewportWidth, viewportHeight],
     uTime: ({ time }) => time,

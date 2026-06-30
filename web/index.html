@@ -102,7 +102,10 @@ const canvas = document.getElementById("gl");
 const errEl = document.getElementById("err");
 const fpsEl = document.getElementById("fps");
 const gl = canvas.getContext("webgl2", { antialias: false, alpha: false });
-if (!gl) { showErr("WebGL2 not available in this browser."); }
+if (!gl) {
+  showErr("WebGL2 not available in this browser.");
+  throw new Error("WebGL2 not supported");   // halt before gl.* calls crash
+}
 
 const VERT = `#version 300 es
 in vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }`;

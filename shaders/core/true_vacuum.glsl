@@ -48,13 +48,18 @@ vec3 alien_field(vec2 uv, float t, float wrongness) {
 // "Wrong speed of light": smear the field directionally so light drags. We fake
 // motion blur cheaply by averaging a few taps along a flow direction.
 vec3 slow_light_smear(vec2 uv, vec2 center, float t, float wrongness) {
-    vec2 flow = normalize(uv - center + 1e-4);          // radial drag outward
+    // radial drag outward; guard the nucleation point so normalize() never
+    // sees a zero vector (normalize(0) == 0/0 == NaN, which would spread).
+    vec2 d = uv - center;
+    vec2 flow = length(d) > 1e-5 ? normalize(d) : vec2(0.0);
     vec3 acc = vec3(0.0);
     const int TAPS = 6;
-    float step = (0.01 + 0.05 * wrongness);
+    // NB: not named `step` — that shadows the GLSL built-in step() and some
+    // strict drivers reject the redeclaration.
+    float step_size = (0.01 + 0.05 * wrongness);
     for (int i = 0; i < TAPS; i++) {
         float k = float(i) / float(TAPS - 1);
-        vec2 sp = uv - flow * step * k;
+        vec2 sp = uv - flow * step_size * k;
         // each echo is older — light arrives delayed
         acc += alien_field(sp, t - k * 0.3 * wrongness, wrongness);
     }
