@@ -1,0 +1,18 @@
+# flattened shader output (regenerate with `node tools/build.mjs --all`)
+/build/
+/dist/
+
+# node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# the source spec archive — the repo IS the unpacked version
+false_vacuum_decay_front.zip
